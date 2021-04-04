@@ -7,21 +7,38 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.LinkedList;
-import java.util.List;
+import java.lang.reflect.Member;
+import android.os.Build;
 
 /**
  * Created by liuruikai756 on 28/03/2017.
  */
 
 public class HookMain {
-    private static final String TAG = "YAHFA";
-    private static List<Class<?>> hookInfoClasses = new LinkedList<>();
+    private static final String TAG = HookMain.class.getSimpleName();
+    // MakeInitializedClassesVisiblyInitialized is called explicitly
+    // entry of jni methods would not be set to jni trampoline after hooked
+    // isDebugModeEnabledR = BuildConfig.DEBUG;
+    // Ref: http://aosp.opersys.com/xref/android-11.0.0_r17/xref/art/runtime/art_method.cc
+//    public static Boolean isDebugModeEnabledR = Boolean.FALSE;
+//    public static void setDebugEnabledR(Boolean b)
+//    {
+//        isDebugModeEnabledR = b;
+//    }
 
     static {
         System.loadLibrary("yahfa");
-        init(android.os.Build.VERSION.SDK_INT);
-        HookMethodResolver.init();
+        // Android SDK Ver
+        int buildSdk = Build.VERSION.SDK_INT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                if(Build.VERSION.PREVIEW_SDK_INT > 0)
+                    buildSdk += 1;
+            } catch (Throwable e) {
+                // ignore
+            }
+        }
+        init(buildSdk);
     }
 
     public static void doHookDefault(ClassLoader patchClassLoader, ClassLoader originClassLoader) {
@@ -31,7 +48,6 @@ public class HookMain {
             for (String hookItemName : hookItemNames) {
                 doHookItemDefault(patchClassLoader, hookItemName, originClassLoader);
             }
-            hookInfoClasses.add(hookInfoClass);
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -68,6 +84,13 @@ public class HookMain {
                 Log.e(TAG, "Cannot find hook for " + methodName);
                 return;
             }
+
+            // has to visibly init the classes
+            // see the comment for function Utils.initClass()
+            if(Utils.initClass() != 0) {
+                Log.e(TAG, "Utils.initClass failed");
+            }
+
             findAndBackupAndHook(clazz, methodName, methodSig, hook, backup);
         } catch (Exception e) {
             e.printStackTrace();
@@ -91,6 +114,12 @@ public class HookMain {
         if (target == null) {
             throw new IllegalArgumentException("null target method");
         }
+        
+//        if(target instanceof Member && Modifier.isStatic(((Member)target).getModifiers()) && isDebugModeEnabledR)
+//        {
+//            throw new IllegalArgumentException("Debug enabled.");
+//        }
+        
         if (hook == null) {
             throw new IllegalArgumentException("null hook method");
         }
@@ -101,14 +130,18 @@ public class HookMain {
         checkCompatibleMethods(target, hook, "Original", "Hook");
         if (backup != null) {
             if (!Modifier.isStatic(backup.getModifiers())) {
-                throw new IllegalArgumentException("Backup must be a static method: " + hook);
+                throw new IllegalArgumentException("Backup must be a static method: " + backup);
             }
             // backup is just a placeholder and the constraint could be less strict
             checkCompatibleMethods(target, backup, "Original", "Backup");
         }
-        if (backup != null) {
-            HookMethodResolver.resolveMethod(hook, backup);
+
+        // has to visibly init the classes
+        // see the comment for function Utils.initClass()
+        if(Utils.initClass() != 0) {
+            Log.e(TAG, "Utils.initClass failed");
         }
+
         if (!backupAndHookNative(target, hook, backup)) {
             throw new RuntimeException("Failed to hook " + target + " with " + hook);
         }
@@ -173,10 +206,28 @@ public class HookMain {
 
     private static native boolean backupAndHookNative(Object target, Method hook, Method backup);
 
-    public static native void ensureMethodCached(Method hook, Method backup);
-
     // JNI.ToReflectedMethod() could return either Method or Constructor
     public static native Object findMethodNative(Class targetClass, String methodName, String methodSig);
 
-    private static native void init(int SDK_version);
+    private static native void init(int sdkVersion);
+
+    public static class Utils {
+        // https://github.com/PAGalaxyLab/YAHFA/pull/133#issuecomment-743728607
+        // class may be visible initialized after it's initialized after Android R
+        // so we have to call MakeInitializedClassesVisiblyInitialized explicitly before hooking
+        public static int initClass() {
+            // do nothing before Android R or on x86 devices
+            if(shouldVisiblyInit()) {
+                long thread = getThread();
+                return visiblyInit(thread);
+            }
+            else {
+                return 0;
+            }
+        }
+
+        private static native boolean shouldVisiblyInit();
+        private static native int visiblyInit(long thread);
+        private static native long getThread();
+    }
 }
